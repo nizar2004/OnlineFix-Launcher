@@ -20,6 +20,7 @@ APP_NAME="OnlineFix Launcher"
 APP_SLUG="onlinefix-launcher"
 APP_ID="io.github.nizar2004.OnlineFixLauncher"
 REPO="nizar2004/OnlineFix-Launcher"
+REPO_NAME="OnlineFix-Launcher"
 BRANCH="main"
 
 MODE="user"
@@ -198,7 +199,7 @@ acquire_source() {
         exit 1
     fi
     tar -xzf "$tarball" -C "$TMP_DIR"
-    SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d -name "$REPO-*" | head -n1)"
+    SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -mindepth 1 -type d -name "${REPO_NAME}-*" | head -n1)"
     if [[ -z "$SRC_DIR" ]]; then
         error "Could not unpack the downloaded archive."
         exit 1
