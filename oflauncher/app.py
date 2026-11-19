@@ -55,7 +55,16 @@ class OnlineFixLauncherApp(Adw.Application):
             "Kill the game currently started by the launcher",
             None,
         )
+        self.add_main_option(
+            "kill-all",
+            0,
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.NONE,
+            "Kill every running Wine/Proton process, even untracked games",
+            None,
+        )
         self._pending_kill = False
+        self._pending_kill_all = False
 
     # -- lifecycle ---------------------------------------------------------------
     def do_startup(self):
@@ -85,24 +94,36 @@ class OnlineFixLauncherApp(Adw.Application):
             self.window = MainWindow(self)
             self.window.wire_runner()
         self.window.refresh_library()
-
-        if self._pending_kill and not self._pending_launch:
-            # Kill and quit silently — useful for scripts and shortcuts.
-            from .runner import runner
-
-            runner.stop()
-            self._pending_kill = False
-            if self.window is not None:
-                self.window.destroy()
-                self.window = None
-            self.quit()
-            return
-
         self.window.present()
 
         if self._pending_launch:
             name, self._pending_launch = self._pending_launch, None
             self.window.launch_game(name, debug=False)
+
+    def _perform_kill(self) -> None:
+        """Stop the running game — works from any process, even without the UI."""
+        from .runner import kill_game_processes, kill_recorded_game, runner
+
+        killed = ""
+        if self._pending_kill:
+            runner.stop()
+            killed = kill_recorded_game() or ""
+        if self._pending_kill_all:
+            count = kill_game_processes()
+            killed = killed or f"{count} Wine/Proton process(es)"
+        self._pending_kill = False
+        self._pending_kill_all = False
+
+        if killed:
+            print(f"Stopped: {killed}")
+        else:
+            print("No game was running.")
+
+        if self.window is not None:
+            self.window.toast(f"Stopped {killed}" if killed else "No game was running")
+            self.window.refresh_library()
+        else:
+            self.quit()
 
     def do_command_line(self, command_line: Gio.ApplicationCommandLine) -> int:
         options = command_line.get_options_dict()
@@ -110,6 +131,14 @@ class OnlineFixLauncherApp(Adw.Application):
             self._pending_launch = options.lookup_value("launch").get_string()
         if options.contains("kill"):
             self._pending_kill = True
+        if options.contains("kill-all"):
+            self._pending_kill_all = True
+
+        if self._pending_kill or self._pending_kill_all:
+            # Killing must never close an open launcher window.
+            self._perform_kill()
+            return 0
+
         self.activate()
         return 0
 

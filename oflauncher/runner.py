@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import time
@@ -12,6 +13,22 @@ from gi.repository import Gio, GLib
 
 from . import config, proton
 from .models import Game
+
+# Marker files/lines used to recognise a running game from *any* launcher
+# instance (the file lets a second `onlinefix-launcher --kill` find it).
+RUNNING_FILE = config.STATE_DIR / "running.json"
+
+# Command-line fragments that identify a game process even when the game was
+# never added to the library.
+GAME_PROCESS_MARKERS = (
+    "wineserver",
+    "wine-preloader",
+    "wine64-preloader",
+    "wine-preloader",
+    "proton waitforexitandrun",
+    "/proton",
+    "proton run",
+)
 
 
 def _child_pids(pid: int) -> List[int]:
@@ -29,6 +46,25 @@ def _child_pids(pid: int) -> List[int]:
         if ppid == pid:
             children.append(int(proc.name))
     return children
+
+
+def _process_start_time(pid: int) -> Optional[int]:
+    """Kernel start time of a pid — used to detect PID reuse."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        return int(stat.rpartition(")")[2].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, ValueError):
+        return False
+    except PermissionError:
+        return True
 
 
 def kill_process_tree(pid: int, sig: int = signal.SIGTERM) -> None:
@@ -52,6 +88,172 @@ def kill_process_tree(pid: int, sig: int = signal.SIGTERM) -> None:
                 continue
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Cross-instance state
+# ---------------------------------------------------------------------------
+def _write_running_state(pid: int, game: Game) -> None:
+    """Remember the running game so another instance can stop it."""
+    try:
+        RUNNING_FILE.parent.mkdir(parents=True, exist_ok=True)
+        RUNNING_FILE.write_text(
+            json.dumps(
+                {
+                    "pid": pid,
+                    "name": game.name,
+                    "executable": game.executable,
+                    "game_dir": game.game_dir,
+                    "runner": game.runner,
+                    "proton_version": game.proton_version,
+                    "prefix": game.prefix_path,
+                    "start_time": _process_start_time(pid),
+                    "launched_at": time.time(),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _read_running_state() -> Optional[Dict]:
+    try:
+        if not RUNNING_FILE.exists():
+            return None
+        return json.loads(RUNNING_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _clear_running_state(pid: Optional[int] = None) -> None:
+    try:
+        data = _read_running_state() or {}
+        if pid is None or int(data.get("pid", 0)) == pid:
+            RUNNING_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _kill_wineserver(runner_name: str, proton_version: str, prefix: str) -> None:
+    """Ask wineserver to shut the prefix down gracefully."""
+    ws = proton.wineserver_for(runner_name or "wine", proton_version or "")
+    if not ws:
+        return
+    env = dict(os.environ)
+    if prefix:
+        if runner_name == "proton":
+            env["STEAM_COMPAT_DATA_PATH"] = prefix
+        else:
+            env["WINEPREFIX"] = prefix
+    try:
+        launcher = Gio.SubprocessLauncher.new(Gio.SubprocessFlags.NONE)
+        for key, value in env.items():
+            launcher.setenv(key, value, True)
+        launcher.spawnv([str(ws), "-k"])
+    except Exception:
+        pass
+
+
+def kill_recorded_game() -> Optional[str]:
+    """Kill the game started by this launcher — from any process.
+
+    Works even when the game was removed from the library, because the PID
+    and its prefix are stored on disk while the game runs.
+    """
+    data = _read_running_state()
+    if not data:
+        return None
+
+    pid = int(data.get("pid", 0) or 0)
+    if pid <= 0:
+        _clear_running_state()
+        return None
+
+    # Guard against PID reuse: the recorded start time must still match.
+    recorded_start = data.get("start_time")
+    current_start = _process_start_time(pid)
+    if recorded_start is not None and current_start is not None and int(recorded_start) != int(current_start):
+        _clear_running_state()
+        return None
+
+    if not _pid_alive(pid):
+        _clear_running_state()
+        return None
+
+    name = str(data.get("name") or "the running game")
+    _kill_wineserver(
+        str(data.get("runner") or "wine"),
+        str(data.get("proton_version") or ""),
+        str(data.get("prefix") or ""),
+    )
+    kill_process_tree(pid, signal.SIGTERM)
+    for _ in range(20):
+        if not _pid_alive(pid):
+            break
+        time.sleep(0.1)
+    if _pid_alive(pid):
+        kill_process_tree(pid, signal.SIGKILL)
+    _clear_running_state(pid)
+    return name
+
+
+def find_game_processes() -> List[Dict[str, str]]:
+    """Find Wine/Proton processes that are running right now.
+
+    Used to stop games that the launcher does not know about (for example a
+    game that was started before it was added to the library).
+    """
+    found: List[Dict[str, str]] = []
+    own = os.getpid()
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        pid = int(proc.name)
+        if pid == own:
+            continue
+        try:
+            raw = (proc / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        cmd = raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
+        if not cmd:
+            continue
+        low = cmd.lower()
+        if not any(marker in low for marker in GAME_PROCESS_MARKERS):
+            continue
+        # Never touch the launcher itself or a shell that merely mentions it.
+        if "onlinefix-launcher" in low or "oflauncher" in low:
+            continue
+        try:
+            comm = (proc / "comm").read_text().strip()
+        except OSError:
+            comm = cmd.split()[0]
+        found.append({"pid": str(pid), "name": comm, "cmdline": cmd[:180]})
+    return found
+
+
+def kill_game_processes() -> int:
+    """Kill every Wine/Proton process found on the system."""
+    processes = find_game_processes()
+    for entry in processes:
+        try:
+            kill_process_tree(int(entry["pid"]), signal.SIGTERM)
+        except Exception:
+            continue
+    time.sleep(0.6)
+    for entry in processes:
+        try:
+            pid = int(entry["pid"])
+        except ValueError:
+            continue
+        if _pid_alive(pid):
+            kill_process_tree(pid, signal.SIGKILL)
+    _clear_running_state()
+    return len(processes)
 
 
 class GameProcess:
@@ -140,6 +342,7 @@ class Runner:
         process = launcher.spawnv(argv)
         started_at = time.monotonic()
         self.current = GameProcess(game, process, debug, started_at)
+        _write_running_state(process.get_identifier() or 0, game)
 
         self._pipe_lines(process.get_stdout_pipe(), self.on_output)
         self._pipe_lines(process.get_stderr_pipe(), self.on_output)
@@ -157,22 +360,15 @@ class Runner:
         pid = proc.process.get_identifier() or 0
 
         # 1. Ask wineserver to shut the prefix down gracefully.
-        ws = proton.wineserver_for(game.runner if game else "wine", game.proton_version if game else "")
-        if ws:
-            env = dict(os.environ)
-            if game:
-                prefix = self._prefix_for(game)
-                if game.runner == "proton":
-                    env["STEAM_COMPAT_DATA_PATH"] = prefix
-                else:
-                    env["WINEPREFIX"] = prefix
-            try:
-                subprocess_env_launcher = Gio.SubprocessLauncher.new(Gio.SubprocessFlags.NONE)
-                for key, value in env.items():
-                    subprocess_env_launcher.setenv(key, value, True)
-                subprocess_env_launcher.spawnv([str(ws), "-k"])
-            except Exception:
-                pass
+        if game:
+            _kill_wineserver(game.runner, game.proton_version, self._prefix_for(game))
+        else:
+            data = _read_running_state() or {}
+            _kill_wineserver(
+                str(data.get("runner") or "wine"),
+                str(data.get("proton_version") or ""),
+                str(data.get("prefix") or ""),
+            )
 
         # 2. Make sure the launcher's own child tree is dead.
         if pid > 0:
@@ -189,6 +385,7 @@ class Runner:
                 proc.process.force_exit()
             except Exception:
                 pass
+        _clear_running_state(pid)
 
     # -- internals -----------------------------------------------------------
     def _game_by_name(self, name: str):
@@ -217,6 +414,7 @@ class Runner:
     def _on_exit(self, process: Gio.Subprocess, result) -> None:
         current = self.current
         name = current.game_name if current else "?"
+        pid = current.process.get_identifier() if current else None
         try:
             process.wait_finish(result)
             code = process.get_exit_status()
@@ -227,6 +425,7 @@ class Runner:
         if current:
             elapsed = int(time.monotonic() - current.started_at)
         self.current = None
+        _clear_running_state(pid)
 
         def finish() -> bool:
             try:

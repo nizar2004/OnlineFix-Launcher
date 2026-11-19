@@ -228,12 +228,17 @@ class MainWindow(Adw.ApplicationWindow):
         self.detail_page.refresh_state()
 
     def kill_running_game(self) -> None:
-        """Kill whatever game the launcher is currently running."""
-        if not runner.current:
+        """Kill whatever game is running — tracked by this instance or another one."""
+        from ..runner import kill_recorded_game
+
+        name = runner.current.game_name if runner.current else None
+        if not name:
+            name = kill_recorded_game()
+        if not name:
             self.toast("No game is running")
             return
-        name = runner.current.game_name
         runner.stop()
+        kill_recorded_game()
         self.toast(f"Stopping {name}…")
 
     def install_from_archive(self, archive: str) -> None:

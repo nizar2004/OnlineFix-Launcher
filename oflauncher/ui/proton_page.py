@@ -9,6 +9,7 @@ from gi.repository import Adw, GLib, Gtk
 
 from .. import icons, proton
 from ..library import run_in_thread
+from ..runner import find_game_processes, kill_game_processes
 
 
 class ProtonPage(Adw.NavigationPage):
@@ -62,6 +63,29 @@ class ProtonPage(Adw.NavigationPage):
         open_btn.set_halign(Gtk.Align.CENTER)
         open_btn.connect("clicked", self._on_open_dir)
 
+        # -- stop running games (also games that were never added) -------------
+        self.processes_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.processes_box.set_visible(False)
+
+        self.process_label = Gtk.Label(label="")
+        self.process_label.add_css_class("dim-label")
+        self.process_label.set_xalign(0)
+        self.process_label.set_wrap(True)
+        self.processes_box.append(self.process_label)
+
+        kill_btn = Gtk.Button()
+        kill_box = Adw.ButtonContent(icon_name="process-stop-symbolic", label="Stop running game processes")
+        kill_btn.set_child(kill_box)
+        kill_btn.add_css_class("destructive-action")
+        kill_btn.connect("clicked", self._on_kill_processes)
+
+        kill_group = Adw.PreferencesGroup(
+            title="Running games",
+            description="Stop a game that is running right now — even if it was never added to the library.",
+        )
+        kill_group.add(self.processes_box)
+        kill_group.add(kill_btn)
+
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         content.set_margin_top(18)
         content.set_margin_bottom(24)
@@ -69,6 +93,7 @@ class ProtonPage(Adw.NavigationPage):
         content.set_margin_end(18)
         content.append(install_group)
         content.append(installed_group)
+        content.append(kill_group)
         content.append(open_btn)
 
         clamp = Adw.Clamp(maximum_size=720, tightening_threshold=600)
@@ -107,6 +132,47 @@ class ProtonPage(Adw.NavigationPage):
             badge.add_css_class("pill")
             row.add_suffix(badge)
             self.list_box.append(row)
+        self._refresh_processes()
+
+    # -- running game processes ---------------------------------------------------
+    def _refresh_processes(self) -> None:
+        processes = find_game_processes()
+        if processes:
+            names = ", ".join(sorted({p["name"] for p in processes}))
+            self.process_label.set_text(f"{len(processes)} running: {names}")
+            self.processes_box.set_visible(True)
+        else:
+            self.process_label.set_text("No Wine or Proton process is running.")
+            self.processes_box.set_visible(True)
+
+    def _on_kill_processes(self, *_):
+        processes = find_game_processes()
+        if not processes:
+            self.window.toast("No game process is running")
+            return
+
+        dialog = Adw.AlertDialog(
+            heading="Stop running game processes?",
+            body=(
+                f"{len(processes)} Wine/Proton process(es) will be terminated, "
+                "including games that were never added to the library."
+            ),
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("kill", "Stop them")
+        dialog.set_response_appearance("kill", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+
+        def on_response(_dialog, response):
+            if response != "kill":
+                return
+            count = kill_game_processes()
+            self._refresh_processes()
+            self.window.toast(f"Stopped {count} process(es)")
+
+        dialog.connect("response", on_response)
+        dialog.present(self.window)
 
     def _on_open_dir(self, *_):
         d = proton.ensure_compat_dir()

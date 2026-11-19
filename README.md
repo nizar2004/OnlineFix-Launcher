@@ -28,7 +28,7 @@ Built with **GTK4 + libadwaita** in pure Python — no Electron, no web UI, no r
 | 🌐 **Built-in browser** | Download games without leaving the app. A real WebKitGTK browser with a download manager built in. |
 | 📦 **Install from download** | Download an archive, click **Install…**, pick a folder — the launcher extracts it and adds the game to your library automatically. |
 | 🛠️ **Per-game control** | Executable, Wine prefix, Proton version, fix type, `WINEDLLOVERRIDES`, extra environment variables, shortcuts — all editable per game. |
-| 🧯 **Kill anything** | A global **Stop** button and `--kill` flag kill the running game and its whole process tree, even if you never added it to the library. |
+| 🧯 **Kill anything** | A global **Stop** button, a Runners-page killer and `--kill` / `--kill-all` flags end the running game and its whole process tree — even games the launcher never started. |
 | 📜 **Live logs** | Watch the game's stdout/stderr in a built-in log viewer, with the ability to save it to a file. |
 | 🎮 **Runners** | Detects every installed Proton and Wine build, and can download the latest **GE-Proton** for you. |
 | 🌙 **Native dark UI** | Purpose-built libadwaita interface with a violet accent — fast, keyboard-friendly and tiny on resources. |
@@ -192,6 +192,8 @@ A guided three-step wizard:
 * Lists every Proton build and Wine installation detected on the system.
 * **Download latest GE-Proton** fetches the newest release and extracts it into
   `~/.local/share/Steam/compatibilitytools.d`.
+* **Running games** shows every Wine/Proton process that is alive right now — including
+  games you started outside the launcher — and can stop them all with one confirmed click.
 * One click opens `compatibilitytools.d` in your file manager.
 
 ### Settings
@@ -241,11 +243,20 @@ A guided three-step wizard:
 onlinefix-launcher                    # open the launcher
 onlinefix-launcher --launch "Game"    # launch a game straight away
 onlinefix-launcher --kill             # kill the game that is currently running
+onlinefix-launcher --kill-all         # kill every running Wine/Proton process
 onlinefix-launcher --help             # show all options
 ```
 
-`--kill` is handy from a script, a keybinding or a panic button: it terminates the running game
-**and every child process it spawned**, even when the game was never added to the library.
+`--kill` works from a script, a keybinding or a panic button — it terminates the running game
+**and every child process it spawned**, even when the launcher itself is already closed. The
+PID of the running game is remembered on disk (`~/.local/state/OnlineFixLauncher/running.json`),
+so any process can stop it. A PID-reuse check makes sure a recycled PID is never killed by
+mistake.
+
+`--kill-all` goes one step further: it scans the process table for Wine and Proton processes and
+stops every one of them — including games you launched outside the launcher and never added to
+the library. The same action is available in the app on the **Runners** page under
+*Running games*.
 
 ---
 
@@ -257,6 +268,7 @@ onlinefix-launcher --help             # show all options
 | `~/.config/OnlineFixLauncher/games.json` | Your library |
 | `~/.cache/OnlineFixLauncher/covers/` | Downloaded cover art |
 | `~/.local/state/OnlineFixLauncher/logs/` | Game logs |
+| `~/.local/state/OnlineFixLauncher/running.json` | PID of the game that is currently running (used by `--kill`) |
 | `~/.local/share/OnlineFixLauncher/Games/` | Default folder for installed games |
 | `~/.local/share/OnlineFixLauncher/Downloads/` | Default download folder |
 | `~/.config/Steam/compatibilitytools.d/` | GE-Proton and other Proton builds |
