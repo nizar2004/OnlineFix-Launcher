@@ -81,7 +81,7 @@ class LibraryPage(Adw.NavigationPage):
         self.search.set_placeholder_text("Search your library…")
         self.search.set_hexpand(True)
         self.search.set_size_request(280, -1)
-        self.search.connect("search-changed", lambda *_: self.flow.invalidate_filter())
+        self.search.connect("search-changed", self._on_search_changed)
 
         header = Adw.HeaderBar()
         header.set_title_widget(self.search)
@@ -118,18 +118,18 @@ class LibraryPage(Adw.NavigationPage):
         self.empty = Adw.StatusPage()
         self.empty.set_title("Your library is empty")
         self.empty.set_description(
-            "Add a game folder and the launcher will find the executables,\n"
-            "fetch the cover art and set up the fix for you."
+            "Add games you own to your library to organize them and manage their settings."
         )
         self.empty.set_paintable(icons.paintable("logo", 96))
-        add_btn = Gtk.Button(label="Add a Game")
-        add_btn.add_css_class("pill")
-        add_btn.add_css_class("suggested-action")
-        add_btn.add_css_class("play-button")
-        add_btn.connect("clicked", lambda *_: window.open_add_dialog())
+        self.empty_action = Gtk.Button(label="Add a Game")
+        self.empty_action.add_css_class("pill")
+        self.empty_action.add_css_class("suggested-action")
+        self.empty_action.add_css_class("play-button")
+        self.empty_action.connect("clicked", self._on_empty_action)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        box.append(add_btn)
+        box.append(self.empty_action)
         self.empty.set_child(box)
+        self._empty_is_search = False
 
         overlay = Gtk.Overlay()
         overlay.set_child(scroll)
@@ -168,9 +168,40 @@ class LibraryPage(Adw.NavigationPage):
             self.flow.append(card)
         self._update_empty()
 
+    def _on_search_changed(self, *_args) -> None:
+        self.flow.invalidate_filter()
+        self._update_empty()
+
     def _update_empty(self) -> None:
-        has_games = self.flow.get_first_child() is not None
-        self.empty.set_visible(not has_games)
+        query = self.search.get_text().strip().casefold()
+        has_games = False
+        has_matches = False
+        child = self.flow.get_first_child()
+        while child:
+            card = child.get_child()
+            if isinstance(card, GameCard):
+                has_games = True
+                has_matches |= query in card.game.name.casefold()
+            child = child.get_next_sibling()
+
+        self._empty_is_search = has_games and not has_matches
+        if self._empty_is_search:
+            self.empty.set_title("No games found")
+            self.empty.set_description("Try a different search term or clear your search.")
+            self.empty_action.set_label("Clear Search")
+        else:
+            self.empty.set_title("Your library is empty")
+            self.empty.set_description(
+                "Add games you own to your library to organize them and manage their settings."
+            )
+            self.empty_action.set_label("Add a Game")
+        self.empty.set_visible(not has_matches)
+
+    def _on_empty_action(self, *_args) -> None:
+        if self._empty_is_search:
+            self.search.set_text("")
+        else:
+            self.window.open_add_dialog()
 
     def _filter_card(self, card: Gtk.FlowBoxChild) -> bool:
         query = self.search.get_text().strip().lower()
