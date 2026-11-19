@@ -199,7 +199,15 @@ acquire_source() {
         exit 1
     fi
     tar -xzf "$tarball" -C "$TMP_DIR"
-    SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -mindepth 1 -type d -name "${REPO_NAME}-*" | head -n1)"
+    # The archive contains a single top-level folder — find the one that holds
+    # the application, regardless of how GitHub names it.
+    SRC_DIR=""
+    for candidate in "$TMP_DIR"/*/; do
+        if [[ -d "$candidate/oflauncher" ]]; then
+            SRC_DIR="${candidate%/}"
+            break
+        fi
+    done
     if [[ -z "$SRC_DIR" ]]; then
         error "Could not unpack the downloaded archive."
         exit 1
